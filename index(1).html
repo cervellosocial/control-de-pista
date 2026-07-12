@@ -1,0 +1,1003 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no" />
+<title>Control de Pista</title>
+<link rel="icon" href="data:,">
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600;700&display=swap');
+  * { box-sizing: border-box; }
+  body { margin: 0; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useMemo } = React;
+
+const COLORS = {
+  bg: "#F6F5EF",
+  card: "#FFFFFF",
+  ink: "#1C2417",
+  inkSoft: "#5B6259",
+  court: "#1F3D2B",
+  courtLight: "#2F5741",
+  ball: "#C9D94A",
+  ballDark: "#98A82A",
+  clay: "#B5502A",
+  claySoft: "#F6E4DA",
+  ok: "#2F6B3A",
+  okSoft: "#E1EEDA",
+  line: "#E3DFD3",
+};
+
+const METODOS = ["Efectivo", "Bizum", "Transferencia", "Tarjeta", "Otro"];
+
+const uid = () =>
+  (crypto?.randomUUID && crypto.randomUUID()) ||
+  Date.now() + "-" + Math.random().toString(36).slice(2);
+
+const hoy = () => new Date().toISOString().slice(0, 10);
+const eur = (n) =>
+  (Math.round((n + Number.EPSILON) * 100) / 100).toLocaleString("es-ES", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }) + " €";
+const fmtFecha = (f) => {
+  const [y, m, d] = f.split("-");
+  return `${d}/${m}/${y.slice(2)}`;
+};
+const mesActual = () => new Date().toISOString().slice(0, 7);
+
+const EMPTY = {
+  clientes: [],
+  clases: [],
+  encordados: [],
+  paquetes: [],
+  precioClaseDefault: 20,
+  precioEncordadoDefault: 15,
+};
+
+const STORAGE_KEY = "control-de-pista-data";
+
+// ---------- pequeños componentes de UI ----------
+
+function Eyebrow({ children }) {
+  return (
+    <div
+      style={{
+        fontFamily: "'Inter', sans-serif",
+        fontSize: 11,
+        letterSpacing: "0.14em",
+        textTransform: "uppercase",
+        color: COLORS.inkSoft,
+        fontWeight: 600,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function Badge({ tipo, children }) {
+  const styles = {
+    debe: { bg: COLORS.claySoft, fg: COLORS.clay },
+    favor: { bg: COLORS.okSoft, fg: COLORS.ok },
+    neutro: { bg: "#EEECE3", fg: COLORS.inkSoft },
+  };
+  const s = styles[tipo] || styles.neutro;
+  return (
+    <span
+      style={{
+        background: s.bg,
+        color: s.fg,
+        fontFamily: "'Inter', sans-serif",
+        fontWeight: 600,
+        fontSize: 12,
+        padding: "3px 9px",
+        borderRadius: 999,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
+function ConfirmDelete({ onConfirm, label = "Eliminar" }) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 3000);
+    return () => clearTimeout(t);
+  }, [armed]);
+  if (!armed)
+    return (
+      <button
+        onClick={() => setArmed(true)}
+        title={label}
+        className="text-xs px-2 py-1 rounded"
+        style={{ color: COLORS.inkSoft, fontFamily: "'Inter', sans-serif" }}
+      >
+        ✕
+      </button>
+    );
+  return (
+    <button
+      onClick={onConfirm}
+      className="text-xs px-2 py-1 rounded font-semibold"
+      style={{
+        background: COLORS.clay,
+        color: "white",
+        fontFamily: "'Inter', sans-serif",
+      }}
+    >
+      ¿Seguro?
+    </button>
+  );
+}
+
+function Field({ label, children }) {
+  return (
+    <label className="flex flex-col gap-1 text-sm" style={{ fontFamily: "'Inter', sans-serif" }}>
+      <span style={{ color: COLORS.inkSoft, fontWeight: 600, fontSize: 12 }}>{label}</span>
+      {children}
+    </label>
+  );
+}
+
+const inputStyle = {
+  border: `1px solid ${COLORS.line}`,
+  borderRadius: 8,
+  padding: "8px 10px",
+  fontFamily: "'Inter', sans-serif",
+  fontSize: 14,
+  background: "white",
+  color: COLORS.ink,
+  outline: "none",
+};
+
+function Btn({ children, onClick, variant = "primary", type = "button", small }) {
+  const base = {
+    fontFamily: "'Inter', sans-serif",
+    fontWeight: 600,
+    fontSize: small ? 13 : 14,
+    padding: small ? "6px 12px" : "9px 16px",
+    borderRadius: 8,
+    cursor: "pointer",
+    border: "1px solid transparent",
+  };
+  const variants = {
+    primary: { background: COLORS.court, color: "white" },
+    ghost: { background: "transparent", color: COLORS.court, border: `1px solid ${COLORS.line}` },
+    ball: { background: COLORS.ball, color: COLORS.court },
+  };
+  return (
+    <button type={type} onClick={onClick} style={{ ...base, ...variants[variant] }}>
+      {children}
+    </button>
+  );
+}
+
+// ---------- App ----------
+
+function App() {
+  const [data, setData] = useState(EMPTY);
+  const [loaded, setLoaded] = useState(false);
+  const [tab, setTab] = useState("clientes");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [pendingImport, setPendingImport] = useState(null);
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) setData({ ...EMPTY, ...JSON.parse(raw) });
+    } catch (e) {
+      // no hay datos guardados todavía
+    } finally {
+      setLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    } catch (e) {
+      console.error("No se pudo guardar", e);
+    }
+  }, [data, loaded]);
+
+  const update = (fn) => setData((d) => fn(JSON.parse(JSON.stringify(d))));
+
+  // ---------- cálculos ----------
+
+  const resumenCliente = (clienteId) => {
+    const clasesPend = data.clases.filter((c) => c.clienteId === clienteId && c.estado === "pendiente");
+    const encPend = data.encordados.filter((e) => e.clienteId === clienteId && e.estado === "pendiente");
+    const deuda = [...clasesPend, ...encPend].reduce((s, x) => s + x.precio, 0);
+    const paquetesActivos = data.paquetes.filter((p) => p.clienteId === clienteId && p.clasesUsadas < p.numClases);
+    const clasesDisponibles = paquetesActivos.reduce((s, p) => s + (p.numClases - p.clasesUsadas), 0);
+    let status = "neutro";
+    if (deuda > 0) status = "debe";
+    else if (clasesDisponibles > 0) status = "favor";
+    return { deuda, clasesDisponibles, paquetesActivos, status };
+  };
+
+  const totales = useMemo(() => {
+    const cobros = [...data.clases, ...data.encordados].filter((x) => x.metodo !== "Bono");
+    const pagos = [
+      ...cobros,
+      ...data.paquetes.map((p) => ({ fecha: p.fecha, precio: p.importe, estado: "pagado", metodo: p.metodo || "—" })),
+    ];
+    const pendiente = cobros.filter((x) => x.estado === "pendiente").reduce((s, x) => s + x.precio, 0);
+    const mes = mesActual();
+    const cobradoMes = pagos
+      .filter((x) => x.estado === "pagado" && x.fecha.slice(0, 7) === mes)
+      .reduce((s, x) => s + x.precio, 0);
+    const cobradoTotal = pagos.filter((x) => x.estado === "pagado").reduce((s, x) => s + x.precio, 0);
+    const porMetodo = {};
+    pagos
+      .filter((x) => x.estado === "pagado")
+      .forEach((x) => {
+        porMetodo[x.metodo || "—"] = (porMetodo[x.metodo || "—"] || 0) + x.precio;
+      });
+    return { pendiente, cobradoMes, cobradoTotal, porMetodo };
+  }, [data]);
+
+  // ---------- acciones ----------
+
+  const addCliente = (nombre) => {
+    if (!nombre.trim()) return;
+    update((d) => {
+      d.clientes.push({ id: uid(), nombre: nombre.trim() });
+      return d;
+    });
+  };
+
+  const delCliente = (id) =>
+    update((d) => {
+      d.clientes = d.clientes.filter((c) => c.id !== id);
+      d.clases = d.clases.filter((c) => c.clienteId !== id);
+      d.encordados = d.encordados.filter((c) => c.clienteId !== id);
+      d.paquetes = d.paquetes.filter((c) => c.clienteId !== id);
+      return d;
+    });
+
+  const addPaquete = (clienteId, numClases, importe, fecha, metodo) =>
+    update((d) => {
+      d.paquetes.push({ id: uid(), clienteId, numClases, clasesUsadas: 0, importe, fecha, metodo });
+      return d;
+    });
+
+  const addClase = ({ clienteId, fecha, precio, modo, metodo }) =>
+    update((d) => {
+      if (modo === "bono") {
+        const paquete = d.paquetes.find((p) => p.clienteId === clienteId && p.clasesUsadas < p.numClases);
+        if (paquete) paquete.clasesUsadas += 1;
+        d.clases.push({
+          id: uid(),
+          clienteId,
+          fecha,
+          precio,
+          estado: "pagado",
+          metodo: "Bono",
+          paqueteId: paquete?.id || null,
+        });
+      } else if (modo === "momento") {
+        d.clases.push({ id: uid(), clienteId, fecha, precio, estado: "pagado", metodo });
+      } else {
+        d.clases.push({ id: uid(), clienteId, fecha, precio, estado: "pendiente", metodo: null });
+      }
+      return d;
+    });
+
+  const addEncordado = ({ clienteId, fecha, descripcion, precio, pagado, metodo }) =>
+    update((d) => {
+      d.encordados.push({
+        id: uid(),
+        clienteId,
+        fecha,
+        descripcion,
+        precio,
+        estado: pagado ? "pagado" : "pendiente",
+        metodo: pagado ? metodo : null,
+      });
+      return d;
+    });
+
+  const marcarPagado = (tipo, id, metodo) =>
+    update((d) => {
+      const lista = tipo === "clase" ? d.clases : d.encordados;
+      const item = lista.find((x) => x.id === id);
+      if (item) {
+        item.estado = "pagado";
+        item.metodo = metodo;
+      }
+      return d;
+    });
+
+  const delItem = (tipo, id) =>
+    update((d) => {
+      if (tipo === "clase") d.clases = d.clases.filter((x) => x.id !== id);
+      if (tipo === "encordado") d.encordados = d.encordados.filter((x) => x.id !== id);
+      if (tipo === "paquete") d.paquetes = d.paquetes.filter((x) => x.id !== id);
+      return d;
+    });
+
+  const nombreCliente = (id) => data.clientes.find((c) => c.id === id)?.nombre || "—";
+
+  const exportarDatos = () => {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `control-de-pista-${hoy()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const onFileSelected = (file) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const parsed = JSON.parse(e.target.result);
+        setPendingImport(parsed);
+      } catch (err) {
+        alert("Ese archivo no parece una copia de seguridad válida.");
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const confirmarImportacion = () => {
+    if (pendingImport) setData({ ...EMPTY, ...pendingImport });
+    setPendingImport(null);
+  };
+
+  if (!loaded) {
+    return (
+      <div style={{ background: COLORS.bg, minHeight: "100vh" }} className="flex items-center justify-center">
+        <span style={{ fontFamily: "'Inter', sans-serif", color: COLORS.inkSoft }}>Cargando…</span>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ background: COLORS.bg, minHeight: "100vh" }}>
+      <style>{`
+        input:focus, select:focus, textarea:focus { border-color: ${COLORS.court} !important; }
+        ::selection { background: ${COLORS.ball}; }
+      `}</style>
+
+      <div className="max-w-3xl mx-auto px-4 pb-24">
+        {/* Header */}
+        <div className="pt-6 pb-4 flex items-start justify-between">
+          <div>
+            <Eyebrow>Clases · Encordados</Eyebrow>
+            <h1
+              style={{
+                fontFamily: "'Bebas Neue', sans-serif",
+                fontSize: 40,
+                color: COLORS.court,
+                letterSpacing: "0.01em",
+                lineHeight: 1,
+              }}
+            >
+              Control de Pista
+            </h1>
+          </div>
+          <button
+            onClick={() => setSettingsOpen((s) => !s)}
+            style={{
+              border: `1px solid ${COLORS.line}`,
+              borderRadius: 8,
+              padding: "8px 10px",
+              background: "white",
+              color: COLORS.inkSoft,
+              fontFamily: "'Inter', sans-serif",
+              fontSize: 13,
+            }}
+          >
+            Ajustes
+          </button>
+        </div>
+
+        {settingsOpen && (
+          <div
+            className="mb-4 p-4 flex gap-4 flex-wrap"
+            style={{ background: COLORS.card, borderRadius: 12, border: `1px solid ${COLORS.line}` }}
+          >
+            <Field label="Precio clase por defecto">
+              <input
+                type="number"
+                style={inputStyle}
+                value={data.precioClaseDefault}
+                onChange={(e) => update((d) => ({ ...d, precioClaseDefault: Number(e.target.value) }))}
+              />
+            </Field>
+            <Field label="Precio encordado por defecto">
+              <input
+                type="number"
+                style={inputStyle}
+                value={data.precioEncordadoDefault}
+                onChange={(e) => update((d) => ({ ...d, precioEncordadoDefault: Number(e.target.value) }))}
+              />
+            </Field>
+            <div className="flex flex-col gap-1">
+              <span style={{ fontFamily: "'Inter', sans-serif", color: COLORS.inkSoft, fontWeight: 600, fontSize: 12 }}>
+                Copia de seguridad
+              </span>
+              <div className="flex gap-2">
+                <Btn small variant="ghost" onClick={exportarDatos}>
+                  Exportar
+                </Btn>
+                <Btn small variant="ghost" onClick={() => fileInputRef.current?.click()}>
+                  Importar
+                </Btn>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="application/json"
+                  style={{ display: "none" }}
+                  onChange={(e) => {
+                    onFileSelected(e.target.files?.[0]);
+                    e.target.value = "";
+                  }}
+                />
+              </div>
+            </div>
+            {pendingImport && (
+              <div
+                className="w-full flex items-center justify-between gap-3 p-3"
+                style={{ background: COLORS.claySoft, borderRadius: 8 }}
+              >
+                <span style={{ fontFamily: "'Inter', sans-serif", fontSize: 13, color: COLORS.ink }}>
+                  Esto reemplazará todos tus datos actuales ({data.clientes.length} clientes) por los del archivo (
+                  {pendingImport.clientes?.length ?? 0} clientes). ¿Continuar?
+                </span>
+                <div className="flex gap-2 shrink-0">
+                  <Btn small onClick={confirmarImportacion}>
+                    Confirmar
+                  </Btn>
+                  <Btn small variant="ghost" onClick={() => setPendingImport(null)}>
+                    Cancelar
+                  </Btn>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Marcador */}
+        <div
+          style={{
+            background: COLORS.court,
+            borderRadius: 16,
+            padding: "22px 24px",
+            display: "flex",
+            position: "relative",
+            overflow: "hidden",
+          }}
+        >
+          <div className="flex-1">
+            <div style={{ fontFamily: "'Inter', sans-serif", fontSize: 11, letterSpacing: "0.14em", textTransform: "uppercase", color: "#C7D6C9", fontWeight: 600 }}>
+              Pendiente de cobro
+            </div>
+            <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 44, color: "#F0B59A", lineHeight: 1.1 }}>
+              {eur(totales.pendiente)}
+            </div>
+          </div>
+          <div
+            aria-hidden
+            style={{
+              width: 1,
+              margin: "0 20px",
+              backgroundImage: `repeating-linear-gradient(to bottom, #4A6B57 0, #4A6B57 6px, transparent 6px, transparent 12px)`,
+            }}
+          />
+          <div className="flex-1">
+            <div style={{ fontFamily: "'Inter', sans-serif", fontSize: 11, letterSpacing: "0.14em", textTransform: "uppercase", color: "#C7D6C9", fontWeight: 600 }}>
+              Cobrado este mes
+            </div>
+            <div style={{ fontFamily: "'Bebas Neue', sans-serif", fontSize: 44, color: COLORS.ball, lineHeight: 1.1 }}>
+              {eur(totales.cobradoMes)}
+            </div>
+          </div>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex gap-1 mt-6 mb-4" style={{ borderBottom: `1px solid ${COLORS.line}` }}>
+          {[
+            ["clientes", "Clientes"],
+            ["clases", "Clases"],
+            ["encordados", "Encordados"],
+            ["resumen", "Resumen"],
+          ].map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setTab(key)}
+              style={{
+                fontFamily: "'Inter', sans-serif",
+                fontWeight: 600,
+                fontSize: 14,
+                padding: "10px 14px",
+                color: tab === key ? COLORS.court : COLORS.inkSoft,
+                borderBottom: tab === key ? `2px solid ${COLORS.ball}` : "2px solid transparent",
+                marginBottom: -1,
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {tab === "clientes" && (
+          <ClientesTab
+            data={data}
+            resumenCliente={resumenCliente}
+            addCliente={addCliente}
+            delCliente={delCliente}
+            addPaquete={addPaquete}
+            delItem={delItem}
+          />
+        )}
+        {tab === "clases" && (
+          <ClasesTab data={data} addClase={addClase} marcarPagado={marcarPagado} delItem={delItem} nombreCliente={nombreCliente} />
+        )}
+        {tab === "encordados" && (
+          <EncordadosTab data={data} addEncordado={addEncordado} marcarPagado={marcarPagado} delItem={delItem} nombreCliente={nombreCliente} />
+        )}
+        {tab === "resumen" && <ResumenTab data={data} totales={totales} nombreCliente={nombreCliente} resumenCliente={resumenCliente} />}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Clientes ----------
+
+function ClientesTab({ data, resumenCliente, addCliente, delCliente, addPaquete, delItem }) {
+  const [nombre, setNombre] = useState("");
+  const [abierto, setAbierto] = useState(null);
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex gap-2 flex-wrap items-end p-3" style={{ background: COLORS.card, borderRadius: 12, border: `1px solid ${COLORS.line}` }}>
+        <Field label="Nuevo cliente">
+          <input style={{ ...inputStyle, minWidth: 160 }} value={nombre} onChange={(e) => setNombre(e.target.value)} placeholder="Nombre" />
+        </Field>
+        <Btn
+          onClick={() => {
+            addCliente(nombre);
+            setNombre("");
+          }}
+        >
+          Añadir
+        </Btn>
+      </div>
+
+      {data.clientes.length === 0 && (
+        <p style={{ fontFamily: "'Inter', sans-serif", color: COLORS.inkSoft, fontSize: 14 }}>
+          Todavía no tienes clientes. Añade el primero arriba.
+        </p>
+      )}
+
+      {data.clientes.map((c) => {
+        const r = resumenCliente(c.id);
+        const clasesC = data.clases.filter((x) => x.clienteId === c.id).sort((a, b) => (a.fecha < b.fecha ? 1 : -1));
+        const encC = data.encordados.filter((x) => x.clienteId === c.id).sort((a, b) => (a.fecha < b.fecha ? 1 : -1));
+        return (
+          <div key={c.id} style={{ background: COLORS.card, borderRadius: 12, border: `1px solid ${COLORS.line}` }}>
+            <div
+              className="flex items-center justify-between p-3 cursor-pointer"
+              onClick={() => setAbierto(abierto === c.id ? null : c.id)}
+            >
+              <div style={{ fontFamily: "'Inter', sans-serif", fontWeight: 700, fontSize: 15, color: COLORS.ink }}>{c.nombre}</div>
+              <div className="flex items-center gap-2">
+                {r.status === "debe" && <Badge tipo="debe">Debe {eur(r.deuda)}</Badge>}
+                {r.status === "favor" && <Badge tipo="favor">A favor: {r.clasesDisponibles} clase{r.clasesDisponibles !== 1 ? "s" : ""}</Badge>}
+                {r.status === "neutro" && <Badge tipo="neutro">Al día</Badge>}
+                <ConfirmDelete onConfirm={() => delCliente(c.id)} />
+              </div>
+            </div>
+
+            {abierto === c.id && (
+              <div className="p-3 pt-0 flex flex-col gap-3" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                <NuevoPaquete clienteId={c.id} addPaquete={addPaquete} precioClaseDefault={data.precioClaseDefault} />
+
+                {r.paquetesActivos.length > 0 && (
+                  <div>
+                    <Eyebrow>Bonos activos</Eyebrow>
+                    {r.paquetesActivos.map((p) => (
+                      <div key={p.id} className="flex justify-between text-sm py-1" style={{ fontFamily: "'Inter', sans-serif", color: COLORS.ink }}>
+                        <span>
+                          {p.clasesUsadas}/{p.numClases} clases usadas · {eur(p.importe)} pagado el {fmtFecha(p.fecha)}
+                        </span>
+                        <ConfirmDelete onConfirm={() => delItem("paquete", p.id)} />
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {(clasesC.length > 0 || encC.length > 0) && (
+                  <div>
+                    <Eyebrow>Historial</Eyebrow>
+                    {clasesC.map((cl) => (
+                      <HistItem key={cl.id} fecha={cl.fecha} label="Clase" precio={cl.precio} estado={cl.estado} metodo={cl.metodo} />
+                    ))}
+                    {encC.map((e) => (
+                      <HistItem key={e.id} fecha={e.fecha} label={`Encordado · ${e.descripcion || "raqueta"}`} precio={e.precio} estado={e.estado} metodo={e.metodo} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function HistItem({ fecha, label, precio, estado, metodo }) {
+  return (
+    <div className="flex justify-between items-center text-sm py-1" style={{ fontFamily: "'Inter', sans-serif" }}>
+      <span style={{ color: COLORS.inkSoft }}>
+        {fmtFecha(fecha)} · {label}
+      </span>
+      <span className="flex items-center gap-2">
+        <span style={{ color: COLORS.ink, fontWeight: 600 }}>{eur(precio)}</span>
+        {estado === "pagado" ? <Badge tipo="favor">{metodo}</Badge> : <Badge tipo="debe">Pendiente</Badge>}
+      </span>
+    </div>
+  );
+}
+
+function NuevoPaquete({ clienteId, addPaquete, precioClaseDefault }) {
+  const [num, setNum] = useState(5);
+  const [importe, setImporte] = useState(5 * precioClaseDefault);
+  const [metodo, setMetodo] = useState(METODOS[0]);
+  const [abierto, setAbierto] = useState(false);
+  if (!abierto)
+    return (
+      <Btn variant="ghost" small onClick={() => setAbierto(true)}>
+        + Añadir bono de clases pagado por adelantado
+      </Btn>
+    );
+  return (
+    <div className="flex gap-2 flex-wrap items-end p-2" style={{ background: COLORS.bg, borderRadius: 8 }}>
+      <Field label="Nº de clases">
+        <input type="number" style={{ ...inputStyle, width: 80 }} value={num} onChange={(e) => setNum(Number(e.target.value))} />
+      </Field>
+      <Field label="Importe total pagado">
+        <input type="number" style={{ ...inputStyle, width: 100 }} value={importe} onChange={(e) => setImporte(Number(e.target.value))} />
+      </Field>
+      <Field label="Método">
+        <select style={inputStyle} value={metodo} onChange={(e) => setMetodo(e.target.value)}>
+          {METODOS.map((m) => (
+            <option key={m}>{m}</option>
+          ))}
+        </select>
+      </Field>
+      <Btn
+        small
+        onClick={() => {
+          addPaquete(clienteId, num, importe, hoy(), metodo);
+          setAbierto(false);
+        }}
+      >
+        Guardar bono
+      </Btn>
+      <Btn small variant="ghost" onClick={() => setAbierto(false)}>
+        Cancelar
+      </Btn>
+    </div>
+  );
+}
+
+// ---------- Clases ----------
+
+function ClasesTab({ data, addClase, marcarPagado, delItem, nombreCliente }) {
+  const [clienteId, setClienteId] = useState(data.clientes[0]?.id || "");
+  const [fecha, setFecha] = useState(hoy());
+  const [precio, setPrecio] = useState(data.precioClaseDefault);
+  const [modo, setModo] = useState("momento");
+  const [metodo, setMetodo] = useState(METODOS[0]);
+
+  const tieneBono = data.paquetes.some((p) => p.clienteId === clienteId && p.clasesUsadas < p.numClases);
+
+  const clasesOrdenadas = [...data.clases].sort((a, b) => (a.fecha < b.fecha ? 1 : -1));
+
+  if (data.clientes.length === 0)
+    return (
+      <p style={{ fontFamily: "'Inter', sans-serif", color: COLORS.inkSoft, fontSize: 14 }}>
+        Añade primero un cliente en la pestaña Clientes.
+      </p>
+    );
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex gap-2 flex-wrap items-end p-3" style={{ background: COLORS.card, borderRadius: 12, border: `1px solid ${COLORS.line}` }}>
+        <Field label="Cliente">
+          <select style={inputStyle} value={clienteId} onChange={(e) => setClienteId(e.target.value)}>
+            {data.clientes.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.nombre}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Fecha">
+          <input type="date" style={inputStyle} value={fecha} onChange={(e) => setFecha(e.target.value)} />
+        </Field>
+        <Field label="Precio">
+          <input type="number" style={{ ...inputStyle, width: 90 }} value={precio} onChange={(e) => setPrecio(Number(e.target.value))} />
+        </Field>
+        <Field label="Cobro">
+          <select style={inputStyle} value={modo} onChange={(e) => setModo(e.target.value)}>
+            {tieneBono && <option value="bono">Usar bono</option>}
+            <option value="momento">Pago al momento</option>
+            <option value="pendiente">Queda pendiente</option>
+          </select>
+        </Field>
+        {modo === "momento" && (
+          <Field label="Método">
+            <select style={inputStyle} value={metodo} onChange={(e) => setMetodo(e.target.value)}>
+              {METODOS.map((m) => (
+                <option key={m}>{m}</option>
+              ))}
+            </select>
+          </Field>
+        )}
+        <Btn
+          onClick={() => {
+            if (!clienteId) return;
+            addClase({ clienteId, fecha, precio, modo, metodo });
+          }}
+        >
+          Registrar clase
+        </Btn>
+      </div>
+
+      {clasesOrdenadas.length === 0 ? (
+        <p style={{ fontFamily: "'Inter', sans-serif", color: COLORS.inkSoft, fontSize: 14 }}>Sin clases registradas todavía.</p>
+      ) : (
+        <div style={{ background: COLORS.card, borderRadius: 12, border: `1px solid ${COLORS.line}` }}>
+          {clasesOrdenadas.map((c) => (
+            <RowItem
+              key={c.id}
+              fecha={c.fecha}
+              titulo={nombreCliente(c.clienteId)}
+              subtitulo="Clase particular"
+              precio={c.precio}
+              estado={c.estado}
+              metodo={c.metodo}
+              onMarcarPagado={(m) => marcarPagado("clase", c.id, m)}
+              onDelete={() => delItem("clase", c.id)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- Encordados ----------
+
+function EncordadosTab({ data, addEncordado, marcarPagado, delItem, nombreCliente }) {
+  const [clienteId, setClienteId] = useState(data.clientes[0]?.id || "");
+  const [fecha, setFecha] = useState(hoy());
+  const [descripcion, setDescripcion] = useState("");
+  const [precio, setPrecio] = useState(data.precioEncordadoDefault);
+  const [pagado, setPagado] = useState(true);
+  const [metodo, setMetodo] = useState(METODOS[0]);
+
+  const ordenados = [...data.encordados].sort((a, b) => (a.fecha < b.fecha ? 1 : -1));
+
+  if (data.clientes.length === 0)
+    return (
+      <p style={{ fontFamily: "'Inter', sans-serif", color: COLORS.inkSoft, fontSize: 14 }}>
+        Añade primero un cliente en la pestaña Clientes.
+      </p>
+    );
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex gap-2 flex-wrap items-end p-3" style={{ background: COLORS.card, borderRadius: 12, border: `1px solid ${COLORS.line}` }}>
+        <Field label="Cliente">
+          <select style={inputStyle} value={clienteId} onChange={(e) => setClienteId(e.target.value)}>
+            {data.clientes.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.nombre}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Fecha">
+          <input type="date" style={inputStyle} value={fecha} onChange={(e) => setFecha(e.target.value)} />
+        </Field>
+        <Field label="Cordaje / notas">
+          <input style={{ ...inputStyle, minWidth: 140 }} value={descripcion} onChange={(e) => setDescripcion(e.target.value)} placeholder="p.ej. RPM Blast 1.25" />
+        </Field>
+        <Field label="Precio">
+          <input type="number" style={{ ...inputStyle, width: 90 }} value={precio} onChange={(e) => setPrecio(Number(e.target.value))} />
+        </Field>
+        <Field label="¿Pagado?">
+          <select style={inputStyle} value={pagado ? "si" : "no"} onChange={(e) => setPagado(e.target.value === "si")}>
+            <option value="si">Sí</option>
+            <option value="no">Queda pendiente</option>
+          </select>
+        </Field>
+        {pagado && (
+          <Field label="Método">
+            <select style={inputStyle} value={metodo} onChange={(e) => setMetodo(e.target.value)}>
+              {METODOS.map((m) => (
+                <option key={m}>{m}</option>
+              ))}
+            </select>
+          </Field>
+        )}
+        <Btn
+          onClick={() => {
+            if (!clienteId) return;
+            addEncordado({ clienteId, fecha, descripcion, precio, pagado, metodo });
+            setDescripcion("");
+          }}
+        >
+          Registrar encordado
+        </Btn>
+      </div>
+
+      {ordenados.length === 0 ? (
+        <p style={{ fontFamily: "'Inter', sans-serif", color: COLORS.inkSoft, fontSize: 14 }}>Sin encordados registrados todavía.</p>
+      ) : (
+        <div style={{ background: COLORS.card, borderRadius: 12, border: `1px solid ${COLORS.line}` }}>
+          {ordenados.map((e) => (
+            <RowItem
+              key={e.id}
+              fecha={e.fecha}
+              titulo={nombreCliente(e.clienteId)}
+              subtitulo={e.descripcion || "Encordado"}
+              precio={e.precio}
+              estado={e.estado}
+              metodo={e.metodo}
+              onMarcarPagado={(m) => marcarPagado("encordado", e.id, m)}
+              onDelete={() => delItem("encordado", e.id)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RowItem({ fecha, titulo, subtitulo, precio, estado, metodo, onMarcarPagado, onDelete }) {
+  const [marcando, setMarcando] = useState(false);
+  const [metodoSel, setMetodoSel] = useState(METODOS[0]);
+  return (
+    <div className="flex items-center justify-between p-3" style={{ borderBottom: `1px solid ${COLORS.line}` }}>
+      <div>
+        <div style={{ fontFamily: "'Inter', sans-serif", fontWeight: 700, fontSize: 14, color: COLORS.ink }}>{titulo}</div>
+        <div style={{ fontFamily: "'Inter', sans-serif", fontSize: 12, color: COLORS.inkSoft }}>
+          {fmtFecha(fecha)} · {subtitulo}
+        </div>
+      </div>
+      <div className="flex items-center gap-2">
+        <span style={{ fontFamily: "'Inter', sans-serif", fontWeight: 700, color: COLORS.ink }}>{eur(precio)}</span>
+        {estado === "pagado" ? (
+          <Badge tipo="favor">{metodo}</Badge>
+        ) : marcando ? (
+          <span className="flex items-center gap-1">
+            <select style={{ ...inputStyle, padding: "4px 6px", fontSize: 12 }} value={metodoSel} onChange={(e) => setMetodoSel(e.target.value)}>
+              {METODOS.map((m) => (
+                <option key={m}>{m}</option>
+              ))}
+            </select>
+            <Btn small onClick={() => onMarcarPagado(metodoSel)}>
+              OK
+            </Btn>
+          </span>
+        ) : (
+          <button onClick={() => setMarcando(true)}>
+            <Badge tipo="debe">Pendiente</Badge>
+          </button>
+        )}
+        <ConfirmDelete onConfirm={onDelete} />
+      </div>
+    </div>
+  );
+}
+
+// ---------- Resumen ----------
+
+function ResumenTab({ data, totales, nombreCliente, resumenCliente }) {
+  const deudores = data.clientes.map((c) => ({ c, r: resumenCliente(c.id) })).filter((x) => x.r.status === "debe");
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="grid grid-cols-3 gap-3">
+        <StatCard label="Cobrado (total)" value={eur(totales.cobradoTotal)} />
+        <StatCard label="Cobrado este mes" value={eur(totales.cobradoMes)} />
+        <StatCard label="Pendiente de cobro" value={eur(totales.pendiente)} accent />
+      </div>
+
+      <div style={{ background: COLORS.card, borderRadius: 12, border: `1px solid ${COLORS.line}`, padding: 16 }}>
+        <Eyebrow>Ingresos por método de pago</Eyebrow>
+        <div className="mt-2 flex flex-col gap-1">
+          {Object.keys(totales.porMetodo).length === 0 && (
+            <span style={{ fontFamily: "'Inter', sans-serif", color: COLORS.inkSoft, fontSize: 14 }}>Todavía no hay cobros registrados.</span>
+          )}
+          {Object.entries(totales.porMetodo).map(([m, v]) => (
+            <div key={m} className="flex justify-between text-sm" style={{ fontFamily: "'Inter', sans-serif" }}>
+              <span style={{ color: COLORS.inkSoft }}>{m}</span>
+              <span style={{ fontWeight: 700, color: COLORS.ink }}>{eur(v)}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ background: COLORS.card, borderRadius: 12, border: `1px solid ${COLORS.line}`, padding: 16 }}>
+        <Eyebrow>Quién debe dinero</Eyebrow>
+        <div className="mt-2 flex flex-col gap-1">
+          {deudores.length === 0 && (
+            <span style={{ fontFamily: "'Inter', sans-serif", color: COLORS.inkSoft, fontSize: 14 }}>Nadie tiene pagos pendientes. 🎾</span>
+          )}
+          {deudores.map(({ c, r }) => (
+            <div key={c.id} className="flex justify-between text-sm" style={{ fontFamily: "'Inter', sans-serif" }}>
+              <span style={{ color: COLORS.ink, fontWeight: 600 }}>{c.nombre}</span>
+              <span style={{ color: COLORS.clay, fontWeight: 700 }}>{eur(r.deuda)}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StatCard({ label, value, accent }) {
+  return (
+    <div style={{ background: COLORS.card, borderRadius: 12, border: `1px solid ${COLORS.line}`, padding: "14px 16px" }}>
+      <div style={{ fontFamily: "'Inter', sans-serif", fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase", color: COLORS.inkSoft, fontWeight: 600 }}>
+        {label}
+      </div>
+      <div
+        style={{
+          fontFamily: "'Bebas Neue', sans-serif",
+          fontSize: 28,
+          color: accent ? COLORS.clay : COLORS.court,
+          marginTop: 2,
+        }}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+
+window.addEventListener("error", (e) => {
+  const root = document.getElementById("root");
+  if (root && !root.dataset.crashed) {
+    root.dataset.crashed = "1";
+    root.innerHTML =
+      '<div style="padding:24px;font-family:sans-serif;max-width:500px;margin:40px auto;">' +
+      '<h2 style="color:#B5502A;">Ha ocurrido un error</h2>' +
+      '<p>La app no ha podido cargar. Copia este mensaje y envíaselo a Claude para arreglarlo:</p>' +
+      '<pre style="white-space:pre-wrap;background:#f4f4f4;padding:12px;border-radius:8px;font-size:13px;">' +
+      (e.message || "Error desconocido") +
+      "</pre></div>";
+  }
+});
+
+</script>
+</body>
+</html>
